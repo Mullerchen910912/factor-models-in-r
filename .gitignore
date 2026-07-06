@@ -1,0 +1,6 @@
+.Rhistory
+.RData
+.Rapp.history
+*_cache/
+*_files/
+.DS_Store

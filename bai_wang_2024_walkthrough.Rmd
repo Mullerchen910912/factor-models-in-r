@@ -1,0 +1,552 @@
+---
+title: "Causal Inference Using Factor Models"
+subtitle: "Replication of Bai & Wang (2024) — Application to Abadie et al. (2010)"
+author: "Sheng-Yuan Chen"
+date: "`r Sys.Date()`"
+output:
+  pdf_document:
+    latex_engine: xelatex
+    toc: true
+    toc_depth: 3
+    number_sections: true
+    fig_caption: true
+    keep_tex: false
+geometry: margin=1in
+fontsize: 11pt
+header-includes:
+  - \usepackage{amsmath, amssymb}
+  - \usepackage{booktabs}
+  - \usepackage{xcolor}
+  - \definecolor{codeblue}{RGB}{30, 100, 200}
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(
+  echo      = TRUE,
+  message   = FALSE,
+  warning   = FALSE,
+  fig.align = "center",
+  fig.width = 6.5,
+  fig.height = 4.2,
+  out.width = "\\textwidth"
+)
+```
+
+```{r packages, include=FALSE}
+library(tidyverse)
+library(tidysynth)
+library(strucchange)
+library(knitr)
+library(kableExtra)
+
+set.seed(2024)
+
+fig_dir <- "/Users/chenshengyuan/Desktop/NTU_ECON/Course/Advanced econometric topic/factor_models"
+```
+
+---
+
+# Overview
+
+Bai and Wang (2024) propose a **causal factor model** framework where policy interventions
+cause structural breaks in unit-specific factor loadings. The key insight is:
+
+$$Y_{it}(d) = \lambda_i(d)'\, f_t + \varepsilon_{it}, \quad d = 0, 1$$
+
+- $f_t \in \mathbb{R}^r$: **common factors** (shared across all units, time-varying)
+- $\lambda_i(d) \in \mathbb{R}^r$: **factor loadings** (unit-specific, treatment-status-dependent)
+- $\varepsilon_{it}$: idiosyncratic error
+
+The **causal effect** for treated unit $i$ at time $t \geq T_0$ is:
+
+$$\tau_{it} = Y_{it}(1) - Y_{it}(0) = [\lambda_i(1) - \lambda_i(0)]'\, f_t$$
+
+The treatment effect operates entirely through the **structural break in loadings**
+$\lambda_i(1) \neq \lambda_i(0)$, not through the idiosyncratic error. This is the
+key advantage over the Xu (2017) / Gobillon-Magnac (2016) approach, where
+$\varepsilon_{it}$ contaminates individual causal estimates.
+
+---
+
+# The Three-Step Algorithm
+
+For the benchmark case without covariates, the estimation procedure is:
+
+**Step 1 — Estimate common factors via PCA (control units only)**
+
+$$\hat{f}_t = \sqrt{T} \cdot \hat{u}_t$$
+
+where $\hat{u}_t$ is the $t$-th row of the left singular matrix from the SVD of the
+(column-demeaned) control unit outcome matrix $\tilde{Y}_c$ ($T \times (n - n_0)$).
+
+**Step 2 — Estimate factor loadings via OLS (treated unit)**
+
+$$\hat{\lambda}_i(0): \quad Y_{it} \sim \mu_i(0) + \lambda_i(0)'\, \hat{f}_t, \quad t < T_0$$
+$$\hat{\lambda}_i(1): \quad Y_{it} \sim \mu_i(1) + \lambda_i(1)'\, \hat{f}_t, \quad t \geq T_0$$
+
+**Step 3 — Construct counterfactual and causal effect**
+
+$$\hat{Y}_{it}(0) = \hat{\mu}_i(0) + \hat{\lambda}_i(0)'\, \hat{f}_t \quad \text{(counterfactual for all } t\text{)}$$
+$$\hat{\tau}_{it} = Y_{it} - \hat{Y}_{it}(0), \quad t \geq T_0$$
+
+> **Why column-demean before PCA?**
+> Demeaning removes each control unit's level, so the extracted factors $\hat{f}_t$
+> capture *common trends* around each unit's mean. The unit-level mean is then
+> absorbed by the intercept $\mu_i(d)$ in the loading regression.
+
+---
+
+# Data: Abadie et al. (2010)
+
+We use the `smoking` dataset from the `tidysynth` package, which replicates
+Abadie, Diamond, and Hainmueller (2010)'s study of California's Proposition 99
+(a cigarette tax initiative passed in 1988, effective 1989).
+
+```{r load-data}
+data(smoking)
+
+# Reshape to wide matrix: T x N
+Y_wide <- smoking |>
+  select(state, year, cigsale) |>
+  pivot_wider(names_from = state, values_from = cigsale) |>
+  arrange(year)
+
+years_ca  <- Y_wide$year
+CA_col    <- which(names(Y_wide) == "California")
+col_order <- c(CA_col, setdiff(2:ncol(Y_wide), CA_col))
+Y_ca      <- as.matrix(Y_wide[, col_order])
+
+# Split treated (CA) and controls
+Y_control <- Y_ca[, -1]   # T x 38
+Y_treated <- Y_ca[,  1]   # T x 1
+
+# Treatment timing
+T_n      <- nrow(Y_ca)
+T0_idx   <- which(years_ca == 1989)
+pre_idx  <- 1:(T0_idx - 1)
+post_idx <- T0_idx:T_n
+
+cat("Panel dimensions:", T_n, "periods x", ncol(Y_ca), "states\n")
+cat("Pre-treatment: 1970–1988 (", length(pre_idx), "years )\n")
+cat("Post-treatment: 1989–2000 (", length(post_idx), "years )\n")
+```
+
+```{r data-plot, fig.cap="Per-capita cigarette sales for all 39 US states, 1970–2000. California (thick blue) is the treated unit; dashed vertical line marks Proposition 99 (1989)."}
+# Raw trends
+smoking |>
+  mutate(CA = state == "California") |>
+  ggplot(aes(x = year, y = cigsale, group = state)) +
+  geom_line(aes(color = CA, alpha = CA, linewidth = CA)) +
+  geom_vline(xintercept = 1988.5, linetype = "dashed",
+             color = "grey40", linewidth = 0.7) +
+  scale_color_manual(values = c("FALSE" = "grey60", "TRUE" = "#2171b5"),
+                     labels = c("Control states", "California"),
+                     name = NULL) +
+  scale_alpha_manual(values = c("FALSE" = 0.3, "TRUE" = 1), guide = "none") +
+  scale_linewidth_manual(values = c("FALSE" = 0.4, "TRUE" = 1.2), guide = "none") +
+  labs(x = "Year", y = "Per-capita cigarette sales (packs)",
+       title = "Cigarette Sales: California vs. 38 Control States") +
+  theme_bw(base_size = 11) +
+  theme(panel.grid.minor = element_blank(),
+        legend.position  = "bottom")
+```
+
+---
+
+# Step 1: Factor Extraction via PCA
+
+## Selecting the Number of Factors
+
+We use the Bai and Ng (2002) $IC_1$ criterion to determine $r$:
+
+$$IC_1(r) = \log V(r) + r \cdot \frac{T + N}{TN} \log C_{NT}^2, \quad C_{NT} = \min\{\sqrt{T}, \sqrt{N}\}$$
+
+where $V(r)$ is the average squared residual from the rank-$r$ factor approximation.
+
+```{r bai-ng}
+bai_ng_ic1 <- function(Y, r_max = 8) {
+  T_n  <- nrow(Y); N_n <- ncol(Y)
+  C2   <- min(T_n, N_n)
+  Y_dm <- scale(Y, center = TRUE, scale = FALSE)
+  sv   <- svd(Y_dm)
+
+  ic1 <- numeric(r_max)
+  for (r in 1:r_max) {
+    F_r      <- sv$u[, 1:r, drop = FALSE] * sqrt(T_n)
+    Lambda_r <- t(Y_dm) %*% F_r / T_n
+    E_r      <- Y_dm - F_r %*% t(Lambda_r)
+    V_r      <- sum(E_r^2) / (T_n * N_n)
+    ic1[r]   <- log(V_r) + r * (T_n + N_n) / (T_n * N_n) * log(C2)
+  }
+  tibble(r = 1:r_max, IC1 = ic1)
+}
+
+ic1_tbl <- bai_ng_ic1(Y_control)
+r_ic1   <- which.min(ic1_tbl$IC1)
+cat("Bai-Ng IC1 minimized at r =", r_ic1, "\n")
+```
+
+```{r ic1-plot, fig.height=3.5, fig.cap="Bai-Ng IC1 criterion. The minimum is at r = 5, but the paper uses r = 2 (Bai and Wang 2024)."}
+ggplot(ic1_tbl, aes(x = r, y = IC1)) +
+  geom_line(linewidth = 0.8) +
+  geom_point(size = 2.5) +
+  geom_point(data = . %>% filter(IC1 == min(IC1)),
+             color = "red", size = 4) +
+  geom_vline(xintercept = 2, linetype = "dashed",
+             color = "steelblue", linewidth = 0.7) +
+  annotate("text", x = 2.2, y = max(ic1_tbl$IC1) * 0.98,
+           label = "r = 2\n(paper)", hjust = 0, color = "steelblue", size = 3.5) +
+  labs(x = "Number of factors r", y = "IC1 value",
+       title = "Bai-Ng (2002) IC1 Criterion") +
+  theme_bw(base_size = 11) +
+  theme(panel.grid.minor = element_blank())
+```
+
+## Extracting Factors
+
+We use $r = 2$ as in Bai & Wang (2024). The factors are the first $r$ left singular
+vectors of the column-demeaned control matrix, scaled by $\sqrt{T}$:
+
+```{r pca}
+r <- 2  # as used in Bai & Wang (2024)
+
+# Column-demean Y_control
+Y_c_dm <- scale(Y_control, center = TRUE, scale = FALSE)
+
+# SVD and factor extraction
+sv_c  <- svd(Y_c_dm)
+F_hat <- sv_c$u[, 1:r] * sqrt(T_n)   # T x r,  satisfies F'F = T * I_r
+
+cat("F_hat dimensions:", dim(F_hat), "\n")
+cat("Check F_hat'F_hat / T:\n")
+print(round(t(F_hat) %*% F_hat / T_n, 4))   # should be identity
+```
+
+The two factors $\hat{f}_t$ are plotted below. Factor 1 captures the dominant
+common trend in cigarette consumption; Factor 2 captures secondary cross-sectional
+variation.
+
+```{r factor-plot, fig.height=3.5, fig.cap="Estimated common factors from PCA of 38 control states."}
+tibble(year = years_ca,
+       `Factor 1` = F_hat[, 1],
+       `Factor 2` = F_hat[, 2]) |>
+  pivot_longer(-year, names_to = "factor", values_to = "value") |>
+  ggplot(aes(x = year, y = value, color = factor)) +
+  geom_line(linewidth = 0.9) +
+  geom_vline(xintercept = 1988.5, linetype = "dashed",
+             color = "grey40", linewidth = 0.6) +
+  scale_color_manual(values = c("Factor 1" = "#2171b5", "Factor 2" = "#d95f0e"),
+                     name = NULL) +
+  labs(x = "Year", y = "Factor value",
+       title = "Estimated Common Factors (r = 2)") +
+  theme_bw(base_size = 11) +
+  theme(panel.grid.minor = element_blank(), legend.position = "bottom")
+```
+
+---
+
+# Step 2: Loading Estimation
+
+We run two separate OLS regressions for California:
+
+1. **Pre-treatment** ($t < T_0$): $Y_{CA,t} = \mu(0) + \lambda(0)'\hat{f}_t + \varepsilon_t$
+   $\Rightarrow$ estimates $(\hat{\mu}_0, \hat{\lambda}_0)$
+
+2. **Post-treatment** ($t \geq T_0$): $Y_{CA,t} = \mu(1) + \lambda(1)'\hat{f}_t + \varepsilon_t$
+   $\Rightarrow$ estimates $(\hat{\mu}_1, \hat{\lambda}_1)$
+
+```{r loadings}
+# Pre-treatment regression
+fit_pre  <- lm(Y_treated[pre_idx]  ~ F_hat[pre_idx, ])
+fit_post <- lm(Y_treated[post_idx] ~ F_hat[post_idx, ])
+
+mu_0     <- coef(fit_pre)[1]
+lambda_0 <- coef(fit_pre)[-1]
+mu_1     <- coef(fit_post)[1]
+lambda_1 <- coef(fit_post)[-1]
+
+# Display results
+tibble(
+  Parameter     = c("mu (intercept)", "lambda_1 (Factor 1)", "lambda_2 (Factor 2)"),
+  `Pre-treatment d=0` = c(mu_0, lambda_0),
+  `Post-treatment d=1` = c(mu_1, lambda_1),
+  `Delta (1)-(0)` = c(mu_1 - mu_0, lambda_1 - lambda_0)
+) |>
+  kbl(digits = 3, booktabs = TRUE,
+      caption = "Estimated factor loadings for California (pre vs. post-treatment)") |>
+  kable_styling(latex_options = c("hold_position"), font_size = 10)
+```
+
+The structural break in $\lambda$ is the source of the causal effect:
+$\hat{\delta} = \hat{\lambda}(1) - \hat{\lambda}(0)$, estimated in the table above.
+
+---
+
+# Step 3: Counterfactual and Causal Effect
+
+The **counterfactual** (what CA's cigarette sales *would have been* without Prop 99)
+uses the pre-treatment loadings for all periods:
+
+$$\hat{Y}_{CA,t}(0) = \hat{\mu}_0 + \hat{\lambda}_0'\,\hat{f}_t, \quad \forall\, t$$
+
+The **causal effect** for post-treatment periods is:
+
+$$\hat{\tau}_{CA,t} = Y_{CA,t} - \hat{Y}_{CA,t}(0) = [\hat{\lambda}_1 - \hat{\lambda}_0]'\,\hat{f}_t,
+\quad t \geq T_0$$
+
+```{r causal-effect}
+# Counterfactual: use pre-treatment loadings for all t
+Y_CF    <- as.vector(mu_0 + F_hat %*% lambda_0)
+tau_all <- Y_treated - Y_CF
+
+# Post-treatment results
+post_results <- tibble(
+  Year         = years_ca[post_idx],
+  `Y actual`   = round(Y_treated[post_idx], 2),
+  `Y(0) counterfactual` = round(Y_CF[post_idx], 2),
+  `tau (ATT)`  = round(tau_all[post_idx], 2)
+)
+
+kbl(post_results, booktabs = TRUE,
+    caption = "Post-treatment causal effects: California, 1989-2000") |>
+  kable_styling(latex_options = c("hold_position", "striped"), font_size = 10) |>
+  row_spec(0, bold = TRUE)
+```
+
+The average ATT over 1989–2000 is **`r round(mean(tau_all[post_idx]), 2)` packs per capita**.
+
+---
+
+# Structural Break Test
+
+## Motivation
+
+The causal effect $\tau_{it} = 0$ if and only if $\lambda_i(1) = \lambda_i(0)$.
+Therefore, testing whether the **treatment had any effect** is equivalent to testing
+whether California's factor loadings underwent a **structural break at $T_0 = 1989$**.
+
+Specifically, we regress California's full-sample outcome on the estimated factors:
+
+$$Y_{CA,t} = \mu + \lambda'\,\hat{f}_t + \varepsilon_t, \quad t = 1, \ldots, T$$
+
+and test $H_0: (\mu, \lambda)$ is stable (no break) against $H_1$: break at $T_0$.
+
+Two tests are used:
+
+- **Chow test** (known break point $T_0 = 1989$): standard F-test comparing restricted
+  (pooled) vs. unrestricted (split-sample) sum of squared residuals.
+- **QLR test / sup-F test** (unknown break point): maximizes the Chow F-statistic
+  over all candidate break dates, with 15% trimming at each end (Andrews 1993).
+
+## Implementation
+
+```{r struct-break}
+# Full-sample data frame: Y_CA ~ F_hat_1 + F_hat_2
+df_sb <- data.frame(y = Y_treated, f1 = F_hat[, 1], f2 = F_hat[, 2])
+
+# ---- Chow test at known break T0 = 1989 (index T0_idx) ----
+chow <- sctest(y ~ f1 + f2, data = df_sb,
+               type = "Chow", point = T0_idx)
+
+cat(sprintf("Chow test at T0 = 1989:\n"))
+cat(sprintf("  F-statistic = %.2f\n", chow$statistic))
+cat(sprintf("  p-value     = %.4f\n\n", chow$p.value))
+
+# ---- QLR (sup-F) test: unknown break, 15%% trimming ----
+fs  <- Fstats(y ~ f1 + f2, data = df_sb, from = 0.15)
+qlr <- sctest(fs, type = "supF")
+
+cat(sprintf("QLR (sup-F) test with 15%% trimming:\n"))
+cat(sprintf("  sup-F statistic = %.2f\n", qlr$statistic))
+cat(sprintf("  p-value         = %.4f\n",  qlr$p.value))
+cat(sprintf("  Max F at year   = %d\n",    years_ca[fs$breakpoint]))
+```
+
+## QLR Plot
+
+```{r struct-break-plot, fig.height=3.5, fig.cap="Chow F-statistics across all candidate break dates (15\\% trimming). The dashed line marks the known treatment date (1989); the red dot marks the supremum."}
+from_obs   <- round(T_n * 0.15)
+year_range <- years_ca[from_obs:(from_obs + length(fs$Fstats) - 1)]
+
+tibble(year = year_range,
+       F    = fs$Fstats) |>
+  ggplot(aes(x = year, y = F)) +
+  geom_line(linewidth = 0.8) +
+  geom_point(data = ~ filter(.x, F == max(F)),
+             color = "red", size = 3.5) +
+  geom_vline(xintercept = 1989, linetype = "dashed",
+             color = "steelblue", linewidth = 0.7) +
+  annotate("text", x = 1989.3, y = max(fs$Fstats) * 0.95,
+           label = "T0 = 1989", hjust = 0, color = "steelblue", size = 3.2) +
+  labs(x = "Year", y = "Chow F-statistic",
+       title = "QLR Test: F-Statistics across Candidate Break Dates") +
+  theme_bw(base_size = 11) +
+  theme(panel.grid.minor = element_blank())
+```
+
+Both tests strongly reject $H_0$, confirming that Proposition 99 induced a
+statistically significant structural break in California's factor loadings.
+
+---
+
+# Standard Errors (Proposition 1)
+
+From Proposition 1 in Bai & Wang (2024), the asymptotic variance of $\hat{\tau}_{it}$ is:
+
+$$\text{var}(\hat{\tau}_{it}) = \hat{z}_{it}'\,\text{var}(\hat{\delta}_i)\,\hat{z}_{it}$$
+
+where $\hat{z}_{it} = \hat{f}_t$ and $\text{var}(\hat{\delta}_i) = \text{var}(\hat{\lambda}_1) + \text{var}(\hat{\lambda}_0)$,
+estimated using the HC0 sandwich estimator for each period's regression.
+
+```{r se}
+var_loading <- function(Y_vec, F_mat) {
+  X     <- cbind(1, F_mat)
+  resid <- residuals(lm(Y_vec ~ F_mat))
+  Xe    <- X * resid
+  bread <- solve(t(X) %*% X / length(Y_vec))
+  meat  <- t(Xe) %*% Xe / length(Y_vec)^2
+  (bread %*% meat %*% bread)[-1, -1]   # drop intercept row/col
+}
+
+V0      <- var_loading(Y_treated[pre_idx],  F_hat[pre_idx, ])
+V1      <- var_loading(Y_treated[post_idx], F_hat[post_idx, ])
+V_delta <- V0 + V1
+
+# SE for each post-treatment period
+se_tau <- sapply(post_idx, function(t_idx) {
+  f_t <- F_hat[t_idx, ]
+  sqrt(as.numeric(t(f_t) %*% V_delta %*% f_t))
+})
+
+cat("Standard errors for tau (1989-2000):\n")
+print(round(se_tau, 3))
+```
+
+---
+
+# Results: Comparison with Synthetic Control
+
+```{r synth-control}
+sc_ca <- smoking |>
+  synthetic_control(
+    outcome           = cigsale,
+    unit              = state,
+    time              = year,
+    i_unit            = "California",
+    i_time            = 1988,
+    generate_placebos = FALSE
+  ) |>
+  generate_predictor(time_window = 1970:1988,
+                     cigsale_avg  = mean(cigsale, na.rm = TRUE)) |>
+  generate_predictor(time_window = 1975, cigsale_1975 = mean(cigsale)) |>
+  generate_predictor(time_window = 1980, cigsale_1980 = mean(cigsale)) |>
+  generate_predictor(time_window = 1988, cigsale_1988 = mean(cigsale)) |>
+  generate_weights(optimization_window = 1970:1988) |>
+  generate_control()
+
+synth_tbl <- sc_ca |>
+  grab_synthetic_control() |>
+  rename(year = time_unit, Y_synth = synth_y) |>
+  mutate(tau_synth = real_y - Y_synth)
+
+results <- tibble(
+  year       = years_ca,
+  Y_actual   = Y_treated,
+  Y_factor   = Y_CF,
+  tau_factor = tau_all,
+  se_tau     = c(rep(NA, length(pre_idx)), se_tau),
+  post       = year >= 1989
+) |>
+  left_join(synth_tbl |> select(year, Y_synth, tau_synth), by = "year")
+```
+
+```{r att-summary}
+tibble(
+  Method = c("Factor model (Bai & Wang 2024)", "Synthetic control (Abadie et al. 2010)"),
+  `ATT 1989-2000` = c(
+    round(mean(tau_all[post_idx]), 2),
+    round(mean(results$tau_synth[results$post], na.rm = TRUE), 2)
+  )
+) |>
+  kbl(booktabs = TRUE,
+      caption = "Comparison of average treatment effects (packs per capita, 1989-2000)") |>
+  kable_styling(latex_options = "hold_position", font_size = 10)
+```
+
+## Figure: Counterfactual Comparison
+
+```{r fig-cf, fig.cap="Actual California vs. counterfactuals from factor model and synthetic control. The two methods yield nearly identical counterfactuals."}
+ggplot(results, aes(x = year)) +
+  geom_line(aes(y = Y_actual, color = "Actual CA"), linewidth = 0.9) +
+  geom_line(aes(y = Y_factor, color = "Factor model CF"),
+            linewidth = 0.9, linetype = "dashed") +
+  geom_point(aes(y = Y_synth,  color = "Synthetic CA"), shape = 3, size = 2) +
+  geom_vline(xintercept = 1988.5, color = "steelblue", linewidth = 0.7) +
+  annotate("text", x = 1985.5, y = 125,
+           label = "Prop 99 →", hjust = 1, size = 3.5, color = "grey40") +
+  scale_color_manual(
+    values = c("Actual CA"        = "#2171b5",
+               "Factor model CF"  = "#d95f0e",
+               "Synthetic CA"     = "#888888"),
+    name = NULL
+  ) +
+  labs(x = "Year", y = "Per-capita cigarette sales (packs)",
+       title    = "Counterfactual California: Factor Model vs. Synthetic Control",
+       subtitle = sprintf("Factor ATT = %.1f  |  Synth ATT = %.1f packs per capita",
+                          mean(tau_all[post_idx]),
+                          mean(results$tau_synth[results$post], na.rm=TRUE))) +
+  theme_bw(base_size = 11) +
+  theme(panel.grid.minor = element_blank(), legend.position = "bottom")
+```
+
+## Figure: Causal Effects with 95% Confidence Interval
+
+```{r fig-gap, fig.cap="Estimated causal effects of Proposition 99 on California cigarette consumption. Shaded region: 95% confidence interval from Proposition 1 (sandwich SE). Blue crosses: synthetic control estimates."}
+ggplot(results, aes(x = year)) +
+  geom_hline(yintercept = 0, linewidth = 0.5) +
+  geom_vline(xintercept = 1988.5, color = "steelblue", linewidth = 0.7) +
+  geom_ribbon(data = . %>% filter(post),
+              aes(ymin = tau_factor - 1.96 * se_tau,
+                  ymax = tau_factor + 1.96 * se_tau),
+              fill = "#d95f0e", alpha = 0.2) +
+  geom_line(aes(y = tau_factor, color = "Factor model"), linewidth = 0.9) +
+  geom_point(aes(y = tau_synth,  color = "Synthetic control"),
+             shape = 3, size = 2.5) +
+  annotate("text", x = 1985.5, y = -2,
+           label = "Prop 99 →", hjust = 1, size = 3.5, color = "grey40") +
+  scale_color_manual(
+    values = c("Factor model"      = "#d95f0e",
+               "Synthetic control" = "#2171b5"),
+    name = NULL
+  ) +
+  labs(x = "Year", y = "Per-capita cigarette sales (packs)",
+       title    = "Causal Effect of Proposition 99: Factor Model vs. Synthetic Control",
+       subtitle = "Shaded = 95% CI (sandwich SE, Proposition 1 of Bai & Wang 2024)") +
+  theme_bw(base_size = 11) +
+  theme(panel.grid.minor = element_blank(), legend.position = "bottom")
+```
+
+---
+
+# Key Takeaways
+
+1. **Factor model and synthetic control yield nearly identical results.**
+   Factor ATT = `r round(mean(tau_all[post_idx]),2)` vs. Synth ATT = `r round(mean(results$tau_synth[results$post],na.rm=TRUE),2)` packs per capita.
+
+2. **The factor model adds confidence intervals** (via Proposition 1),
+   which the standard synthetic control method lacks.
+
+3. **Structural break confirmed:** Both the Chow test ($T_0 = 1989$) and the
+   QLR sup-F test (unknown break, 15\% trimming) strongly reject $H_0: \lambda(1) = \lambda(0)$
+   ($p = 0.000$), validating the causal identification assumption.
+
+4. **Implementation is simple**: 3 steps requiring only PCA + two OLS regressions,
+   with no constrained optimization (unlike the synthetic control).
+
+---
+
+# References
+
+- Abadie, A., Diamond, A., & Hainmueller, J. (2010). Synthetic control methods for comparative case studies. *JASA*, 105(490), 493–505.
+- Bai, J., & Ng, S. (2002). Determining the number of factors in approximate factor models. *Econometrica*, 70(1), 191–221.
+- Bai, J., & Wang, P. (2024). Causal inference using factor models. MPRA Paper No. 120585.
