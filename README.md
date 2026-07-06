@@ -37,6 +37,18 @@ rmarkdown::render("bai_wang_2024_walkthrough.Rmd")
 All data here is public (S&P 500 prices; California schools). Typical packages:
 `tidyverse`, `stats` (`prcomp`), and base R.
 
+### Python version
+
+A Python port of the S&P 500 PCA lives in [`python/`](python/) (pandas +
+scikit-learn). It reproduces the analysis and labels each estimated factor with
+the modal **sector** of its top-loading stocks — so the "tech / energy /
+defensives" factors fall out of the data:
+
+```bash
+pip install -r python/requirements.txt
+python python/pca_sp500.py
+```
+
 ## References
 
 - Bai, J. & Wang, P. (2024). *Causal inference with factor models.*
